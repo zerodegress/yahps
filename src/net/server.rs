@@ -119,18 +119,16 @@ impl Server {
                                     }
                                 }
                             });
-                            let _ = tokio::join!(
-                                tokio::spawn(async move {
-                                    while let Some(packet) = send_packet_rx.recv().await {
-                                        if let Err(err) = packet.write_into_net(&mut sw).await {
-                                            // TODO: more error processing
-                                            warn!("{}", err);
-                                            break;
-                                        }
+                            let send_task = tokio::spawn(async move {
+                                while let Some(packet) = send_packet_rx.recv().await {
+                                    if let Err(err) = packet.write_into_net(&mut sw).await {
+                                        // TODO: more error processing
+                                        warn!("{}", err);
+                                        break;
                                     }
-                                }),
-                                recv_task
-                            );
+                                }
+                            });
+                            let _ = tokio::join!(send_task, recv_task);
                         }
                     }
                 }
