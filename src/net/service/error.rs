@@ -1,28 +1,29 @@
 use std::fmt::Display;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HandlePacketErrorKind {
+pub enum ErrorKind {
     Ignorable,
+    WarnOnly,
     Disconnect,
     Fatal,
 }
 
 #[derive(Debug)]
-pub struct HandlePacketError {
-    kind: HandlePacketErrorKind,
+pub struct Error {
+    kind: ErrorKind,
     err: Box<dyn std::error::Error + Sync + Send>,
 }
 
-impl Display for HandlePacketError {
+impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl std::error::Error for HandlePacketError {}
+impl std::error::Error for Error {}
 
-impl HandlePacketError {
-    pub fn new<E>(kind: HandlePacketErrorKind, err: E) -> Self
+impl Error {
+    pub fn new<E>(kind: ErrorKind, err: E) -> Self
     where
         E: Into<Box<dyn std::error::Error + Sync + Send>>,
     {
@@ -32,7 +33,11 @@ impl HandlePacketError {
         }
     }
 
-    pub fn kind(&self) -> &HandlePacketErrorKind {
+    pub fn kind(&self) -> &ErrorKind {
         &self.kind
+    }
+
+    pub fn err(&self) -> &dyn std::error::Error {
+        self.err.as_ref()
     }
 }

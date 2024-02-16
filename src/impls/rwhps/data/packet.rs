@@ -1,13 +1,8 @@
-pub mod error;
-
 use std::io::{Read, Write};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{buf::Reader, Buf, Bytes};
-use log::warn;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
-use self::error::PacketTypeCastError;
 
 #[derive(Clone)]
 pub struct Packet {
@@ -53,11 +48,7 @@ impl Packet {
     where
         R: AsyncRead + Unpin,
     {
-        let ty = input
-            .read_i32()
-            .await?
-            .try_into()
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+        let ty = input.read_i32().await?.into();
         let bytes = {
             let mut buf = vec![0; input.read_i32().await? as usize];
             input.read_exact(&mut buf).await?;
@@ -94,15 +85,7 @@ impl Packet {
             ))?
         }
 
-        let ty: PacketType =
-            input
-                .read_i32()
-                .await?
-                .try_into()
-                .map_err(|err: PacketTypeCastError| {
-                    warn!("[PacketDecoder] Unknown Protocol, Type : {}", err.0);
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-                })?;
+        let ty: PacketType = input.read_i32().await?.into();
 
         let bytes = {
             let mut buf = vec![0; len as usize];
@@ -207,9 +190,8 @@ pub enum PacketControl {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, num_enum::FromPrimitive, num_enum::IntoPrimitive,
 )]
-#[num_enum(error_type(name = PacketTypeCastError, constructor = PacketTypeCastError::new))]
 #[repr(i32)]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 pub enum PacketType {
@@ -264,5 +246,6 @@ pub enum PacketType {
     PACKET_RECONNECT_TO = 178,
     /* MISC */
     EMPTYP_ACKAGE = 0,
+    #[num_enum(default)]
     NOT_RESOLVED = -1,
 }

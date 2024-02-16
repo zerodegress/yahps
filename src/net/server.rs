@@ -1,56 +1,33 @@
-pub mod error;
-
-use std::{
-    net::SocketAddr,
-    sync::{atomic::AtomicUsize, Arc},
-};
-
+use dashmap::DashMap;
 use log::warn;
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-    task::JoinSet,
-};
+use std::{net::SocketAddr, sync::Arc, time::SystemTime};
+use tokio::{net::TcpListener, sync::broadcast, task::JoinSet};
 
-use crate::{data::packet::Packet, net::service::error::HandlePacketErrorKind};
+use crate::net::service::{ConnectionHandle, Decoder, Encoder};
 
-use self::error::WorkerError;
+use super::service::Service;
 
-use super::{
-    connection::Connection,
-    service::{NeverService, Service},
-};
-
-pub trait PacketHandler {
-    fn handle_packet(&self, conn: &mut Connection, packet: Packet) -> Result<(), WorkerError>;
-}
-
-impl<T> PacketHandler for T
+pub struct Server<S>
 where
-    T: Fn(&mut Connection, Packet) -> Result<(), WorkerError>,
+    S: Service,
 {
-    fn handle_packet(&self, conn: &mut Connection, packet: Packet) -> Result<(), WorkerError> {
-        self(conn, packet)
-    }
-}
-
-pub struct Server {
     binds: Vec<SocketAddr>,
-    default_worker_count: usize,
-    service: Box<dyn Service + Send + Sync>,
+    worker_count: usize,
+    service: S,
 }
 
-impl Default for Server {
-    fn default() -> Self {
+impl<S> Server<S>
+where
+    S: Service,
+{
+    pub fn new(service: S) -> Self {
         Self {
             binds: vec![],
-            default_worker_count: num_cpus::get(),
-            service: Box::new(NeverService),
+            worker_count: num_cpus::get(),
+            service,
         }
     }
-}
 
-impl Server {
     pub fn bind<Addr>(mut self, addr: Addr) -> Self
     where
         Addr: Into<SocketAddr>,
@@ -59,114 +36,110 @@ impl Server {
         self
     }
 
-    pub fn service<S>(mut self, service: S) -> Self
-    where
-        S: Service + Send + Sync + 'static,
-    {
-        self.service = Box::new(service);
-        self
-    }
-
-    pub async fn run(self) {
-        let free_worker_count = Arc::new(AtomicUsize::new(0));
+    pub async fn run(self) -> Result<JoinSet<()>, std::io::Error> {
         let service = Arc::new(self.service);
-        let (conn_tx, conn_rx) = async_channel::unbounded::<(TcpStream, SocketAddr)>();
-        let mut worker_joinset = JoinSet::new();
-
-        (0..self.default_worker_count).for_each(|_| {
-            let rx = conn_rx.clone();
-            let free_worker_count = free_worker_count.clone();
+        let (conn_broadcast_tx, conn_broadcast_rx) =
+            broadcast::channel::<(ConnectionSendMessageType, S::Packet)>(64);
+        let (packet_tx, packet_rx) =
+            async_channel::bounded::<(S::Packet, SocketAddr, SystemTime)>(self.worker_count);
+        let conn_data_map = Arc::new(DashMap::<SocketAddr, Arc<()>>::new());
+        let global_data = None as Option<Arc<()>>;
+        let mut join_set = JoinSet::new();
+        for _ in 0..self.worker_count {
+            let conn_broadcast_tx = conn_broadcast_tx.clone();
+            let packet_rx = packet_rx.clone();
+            let conn_data_map = conn_data_map.clone();
             let service = service.clone();
-
-            worker_joinset.spawn(async move {
+            join_set.spawn(async move {
                 loop {
-                    let service = service.clone();
-                    free_worker_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    match rx.recv().await {
+                    match packet_rx.recv().await {
                         Err(err) => {
-                            // TODO: more error processing
                             warn!("{}", err);
-                            break;
+                        }
+                        Ok((packet, addr, time)) => {
+                            let conn_handle = ConnectionHandle::new(addr, time, || todo!());
+                            let local = conn_data_map.get(&addr).map(|x| x.clone());
+                            todo!()
+                        }
+                    }
+                }
+            });
+        }
+        for bind in self.binds {
+            let listener = TcpListener::bind(bind).await?;
+            let service = service.clone();
+            let conn_broadcast_tx = conn_broadcast_tx.clone();
+            let packet_tx = packet_tx.clone();
+            join_set.spawn(async move {
+                loop {
+                    let packet_tx = packet_tx.clone();
+                    let decoder = service.create_decoder();
+                    let encoder = service.create_encoder();
+                    match listener.accept().await {
+                        Err(err) => {
+                            warn!("{}", err);
                         }
                         Ok((stream, addr)) => {
-                            free_worker_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                            let (sr, mut sw) = stream.into_split();
-                            let (send_packet_tx, mut send_packet_rx) = mpsc::channel(64);
-                            let conn = Connection::connect(addr, sr, send_packet_tx.clone());
-                            let recv_task = tokio::spawn(async move {
-                                let mut service_handler = service.create_handler(conn);
-                                loop {
-                                    match service_handler.read_packet().await {
-                                        Err(err) => {
-                                            // TODO: more error processing
+                            let mut conn_broadcast_rx = conn_broadcast_tx.subscribe();
+                            let (mut stream_rx, mut stream_tx) = stream.into_split();
+                            tokio::spawn(async move {
+                                match decoder.decode(&mut stream_rx).await {
+                                    Err(err) => {
+                                        warn!("{}", err)
+                                    }
+                                    Ok(packet) => {
+                                        if let Err(err) =
+                                            packet_tx.send((packet, addr, SystemTime::now())).await
+                                        {
                                             warn!("{}", err);
-                                            break;
                                         }
-                                        Ok(packet) => {
+                                    }
+                                }
+                            });
+                            tokio::spawn(async move {
+                                match conn_broadcast_rx.recv().await {
+                                    Err(err) => {
+                                        warn!("{}", err)
+                                    }
+                                    Ok((ty, packet)) => {
+                                        let send = async move {
                                             if let Err(err) =
-                                                service_handler.handle_packet(&packet).await
+                                                encoder.encode(&mut stream_tx, &packet).await
                                             {
-                                                match err.kind() {
-                                                    HandlePacketErrorKind::Disconnect => break,
-                                                    HandlePacketErrorKind::Fatal => {
-                                                        // TODO: more exactly
-                                                        panic!("{}", err)
-                                                    }
-                                                    HandlePacketErrorKind::Ignorable => {}
-                                                }
+                                                warn!("{}", err);
                                             }
+                                        };
+                                        match ty {
+                                            ConnectionSendMessageType::All => {
+                                                send.await;
+                                            }
+                                            ConnectionSendMessageType::Only(only_addr)
+                                                if addr == only_addr =>
+                                            {
+                                                send.await;
+                                            }
+                                            ConnectionSendMessageType::Without(without_addr)
+                                                if addr != without_addr =>
+                                            {
+                                                send.await;
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
                             });
-                            let send_task = tokio::spawn(async move {
-                                while let Some(packet) = send_packet_rx.recv().await {
-                                    if let Err(err) = packet.write_into_net(&mut sw).await {
-                                        // TODO: more error processing
-                                        warn!("{}", err);
-                                        break;
-                                    }
-                                }
-                            });
-                            let _ = tokio::join!(send_task, recv_task);
                         }
                     }
                 }
             });
-        });
-
-        let mut boss_joinset = JoinSet::new();
-        self.binds.into_iter().for_each(|bind| {
-            let conn_tx = conn_tx.clone();
-            boss_joinset.spawn(async move {
-                match TcpListener::bind(bind).await {
-                    Err(err) => {
-                        // TODO: more error processing
-                        warn!("{}", err);
-                    }
-                    Ok(listener) => loop {
-                        match listener.accept().await {
-                            Err(err) => {
-                                // TODO: more error processing
-                                warn!("{}", err);
-                                break;
-                            }
-                            Ok((stream, addr)) => {
-                                if let Err(err) = conn_tx.send((stream, addr)).await {
-                                    // TODO: more error processing
-                                    warn!("{}", err);
-                                    break;
-                                }
-                            }
-                        }
-                    },
-                }
-            });
-        });
-
-        while boss_joinset.join_next().await.is_some() {}
-        while worker_joinset.join_next().await.is_some() {}
-
+        }
         todo!()
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ConnectionSendMessageType {
+    All,
+    Only(SocketAddr),
+    Without(SocketAddr),
 }
