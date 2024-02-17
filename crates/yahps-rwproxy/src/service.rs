@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::packet::Packet;
 
-use yahps::net::service::{self, Service};
+use yahps::service::{self, Service};
 
 pub struct Proxy;
 
@@ -16,15 +16,9 @@ impl Service for Proxy {
     type Decoder = Decoder;
     type Encoder = Encoder;
     type LocalData = ();
-    type GlobalData = Global;
+    type Addr = SocketAddr;
 
     fn init(&mut self) {}
-
-    fn init_global(&mut self) -> Self::GlobalData {
-        Global {
-            _target: ([127, 0, 0, 1], 5123).into(),
-        }
-    }
 
     fn init_local(&self) -> Self::LocalData {}
 
@@ -50,9 +44,26 @@ impl service::Decoder for Decoder {
         &self,
         reader: &mut (dyn AsyncRead + Unpin + Send),
     ) -> Result<Self::Packet, service::Error> {
+        self._decode(reader).await
+    }
+}
+
+impl Decoder {
+    async fn _decode(
+        &self,
+        reader: &mut (dyn AsyncRead + Unpin + Send),
+    ) -> Result<Packet, service::Error> {
         Packet::read_from_net(&mut Box::new(reader))
             .await
-            .map_err(|err| service::Error::new(service::ErrorKind::WarnOnly, err))
+            .map_err(|err| {
+                service::Error::new(
+                    match err.kind() {
+                        std::io::ErrorKind::ConnectionReset => service::ErrorKind::Disconnect,
+                        _ => service::ErrorKind::WarnOnly,
+                    },
+                    err,
+                )
+            })
     }
 }
 
@@ -77,22 +88,17 @@ pub struct Handler;
 
 impl service::Handler for Handler {
     type Packet = Packet;
-    type Global = Global;
     type Local = ();
+    type Addr = SocketAddr;
 
     fn handle(
         &mut self,
         packet: Self::Packet,
-        conn: service::ConnectionHandle<Self::Packet>,
+        _conn: service::ConnectionHandle<Self::Packet, Self::Addr>,
         _local: std::sync::Arc<Self::Local>,
-        _global: std::sync::Arc<Self::Global>,
     ) -> Result<(), service::Error> {
         info!("{:?}", packet.ty());
-        conn.disconnect();
+        // conn.disconnect();
         Ok(())
     }
-}
-
-pub struct Global {
-    _target: SocketAddr,
 }

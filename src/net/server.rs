@@ -3,13 +3,11 @@ use log::warn;
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{net::TcpListener, sync::broadcast, task::JoinSet};
 
-use crate::net::service::{AddrTarget, ConnectionHandle, Decoder, Encoder, Handler};
-
-use super::service::Service;
+use crate::service::{AddrTarget, ConnectionHandle, Decoder, Encoder, ErrorKind, Handler, Service};
 
 pub struct Server<S>
 where
-    S: Service,
+    S: Service<Addr = SocketAddr>,
 {
     binds: Vec<SocketAddr>,
     worker_count: usize,
@@ -18,7 +16,7 @@ where
 
 impl<S> Server<S>
 where
-    S: Service,
+    S: Service<Addr = SocketAddr>,
 {
     pub fn new(service: S) -> Self {
         Self {
@@ -36,13 +34,13 @@ where
         self
     }
 
-    pub async fn run(mut self) -> Result<(), std::io::Error> {
-        let (disconnect_broadcast_tx, _) = broadcast::channel::<AddrTarget>(64);
-        let (send_packet_broadcast_tx, _) = broadcast::channel::<(AddrTarget, S::Packet)>(64);
+    pub async fn run(self) -> Result<(), std::io::Error> {
+        let (disconnect_broadcast_tx, _) = broadcast::channel::<AddrTarget<S::Addr>>(64);
+        let (send_packet_broadcast_tx, _) =
+            broadcast::channel::<(AddrTarget<S::Addr>, S::Packet)>(64);
         let (packet_tx, packet_rx) =
             async_channel::bounded::<(S::Packet, SocketAddr, SystemTime)>(self.worker_count);
         let local_data_map = Arc::new(DashMap::<SocketAddr, Arc<S::LocalData>>::new());
-        let global_data = Arc::new(self.service.init_global());
         let service = Arc::new(self.service);
         let mut join_set = JoinSet::new();
 
@@ -52,7 +50,6 @@ where
             let packet_rx = packet_rx.clone();
             let conn_data_map = local_data_map.clone();
             let service = service.clone();
-            let global_data = global_data.clone();
             join_set.spawn(async move {
                 let mut handler = service.create_handler();
                 let send_packet_fn = move |target, packet| {
@@ -88,8 +85,7 @@ where
                                         conn_data_map.insert(addr, local.clone());
                                         local
                                     });
-                            let global = global_data.clone();
-                            if let Err(err) = handler.handle(packet, conn, local, global) {
+                            if let Err(err) = handler.handle(packet, conn, local) {
                                 warn!("{}", err);
                             }
                         }
@@ -119,7 +115,11 @@ where
                             let mut conn_broadcast_rx = conn_broadcast_tx.subscribe();
                             let (mut stream_rx, mut stream_tx) = stream.into_split();
                             {
-                                let mut disconnect_broadcast_rx = disconnect_broadcast_tx.subscribe();
+                                let (disconnect_broadcast_tx, mut disconnect_broadcast_rx) = {
+                                    let rx = disconnect_broadcast_tx.clone().subscribe();
+                                    let tx = disconnect_broadcast_tx.clone();
+                                    (tx, rx)
+                                };
                                 join_set.spawn(async move {
                                     loop {
                                         tokio::select! {
@@ -145,7 +145,18 @@ where
                                             res = decoder.decode(&mut stream_rx) => {
                                                 match res {
                                                     Err(err) => {
-                                                        warn!("{}", err)
+                                                        warn!("{}", err);
+                                                        match err.kind() {
+                                                            ErrorKind::Disconnect => {
+                                                                if let Err(err) = disconnect_broadcast_tx.send(AddrTarget::Only(addr)) {
+                                                                    warn!("{}", err);
+                                                                }
+                                                            }
+                                                            ErrorKind::Fatal => {
+                                                                panic!();
+                                                            }
+                                                            _ => {}
+                                                        }
                                                     }
                                                     Ok(packet) => {
                                                         if let Err(err) =
@@ -161,7 +172,11 @@ where
                                 });
                             }
                             {
-                                let mut disconnect_broadcast_rx = disconnect_broadcast_tx.subscribe();
+                                let (disconnect_broadcast_tx, mut disconnect_broadcast_rx) = {
+                                    let rx = disconnect_broadcast_tx.clone().subscribe();
+                                    let tx = disconnect_broadcast_tx.clone();
+                                    (tx, rx)
+                                };
                                 join_set.spawn(async move {
                                     loop {
                                         tokio::select! {
@@ -195,6 +210,17 @@ where
                                                                 encoder.encode(&mut stream_tx, &packet).await
                                                             {
                                                                 warn!("{}", err);
+                                                                match err.kind() {
+                                                                    ErrorKind::Disconnect => {
+                                                                        if let Err(err) = disconnect_broadcast_tx.send(AddrTarget::Only(addr)) {
+                                                                            warn!("{}", err);
+                                                                        }
+                                                                    }
+                                                                    ErrorKind::Fatal => {
+                                                                        panic!();
+                                                                    }
+                                                                    _ => {}
+                                                                }
                                                             }
                                                         };
                                                         match target {
@@ -230,3 +256,7 @@ where
         Ok(())
     }
 }
+
+pub trait ServerSocketAddr {}
+
+impl ServerSocketAddr for SocketAddr {}

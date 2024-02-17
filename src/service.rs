@@ -13,22 +13,19 @@ where
     Self::Packet: Clone + Send + Sync + 'static,
     Self::Decoder: Decoder<Packet = Self::Packet> + Send + Sync,
     Self::Encoder: Encoder<Packet = Self::Packet> + Send + Sync,
-    Self::Handler: Handler<Packet = Self::Packet, Local = Self::LocalData, Global = Self::GlobalData>
-        + Send
-        + Sync,
+    Self::Handler:
+        Handler<Packet = Self::Packet, Local = Self::LocalData, Addr = Self::Addr> + Send + Sync,
     Self::LocalData: Send + Sync,
-    Self::GlobalData: Send + Sync,
+    Self::Addr: Copy + Send + Sync,
 {
     type Packet;
     type Decoder;
     type Encoder;
     type Handler;
     type LocalData;
-    type GlobalData;
+    type Addr;
 
     fn init(&mut self);
-
-    fn init_global(&mut self) -> Self::GlobalData;
 
     fn init_local(&self) -> Self::LocalData;
 
@@ -43,18 +40,17 @@ pub trait Handler
 where
     Self::Packet: Clone + Send + Sync + 'static,
     Self::Local: Send + Sync,
-    Self::Global: Send + Sync,
+    Self::Addr: Copy + Send + Sync,
 {
     type Packet;
     type Local;
-    type Global;
+    type Addr;
 
     fn handle(
         &mut self,
         packet: Self::Packet,
-        conn: ConnectionHandle<Self::Packet>,
+        conn: ConnectionHandle<Self::Packet, Self::Addr>,
         local: Arc<Self::Local>,
-        global: Arc<Self::Global>,
     ) -> Result<(), Error>;
 }
 
@@ -83,14 +79,14 @@ where
     ) -> Result<(), Error>;
 }
 
-pub struct ConnectionHandle<P> {
+pub struct ConnectionHandle<P: Clone + Send + Sync + 'static, A: Copy + Send + Sync> {
     addr: SocketAddr,
     last_time: SystemTime,
     disconnect_fn: Box<dyn Fn()>,
-    send_packet_fn: Box<dyn Fn(AddrTarget, P)>,
+    send_packet_fn: Box<dyn Fn(AddrTarget<A>, P)>,
 }
 
-impl<P> ConnectionHandle<P> {
+impl<P: Clone + Send + Sync + 'static, A: Copy + Send + Sync> ConnectionHandle<P, A> {
     pub fn new<F, S>(
         addr: SocketAddr,
         last_time: SystemTime,
@@ -99,7 +95,7 @@ impl<P> ConnectionHandle<P> {
     ) -> Self
     where
         F: Fn() + 'static,
-        S: Fn(AddrTarget, P) + 'static,
+        S: Fn(AddrTarget<A>, P) + 'static,
     {
         Self {
             addr,
@@ -121,14 +117,14 @@ impl<P> ConnectionHandle<P> {
         (self.disconnect_fn)()
     }
 
-    pub fn send_packet(&self, target: AddrTarget, packet: P) {
+    pub fn send_packet(&self, target: AddrTarget<A>, packet: P) {
         (self.send_packet_fn)(target, packet)
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum AddrTarget {
+pub enum AddrTarget<Addr: Copy + Send + Sync> {
     All,
-    Only(SocketAddr),
-    Without(SocketAddr),
+    Only(Addr),
+    Without(Addr),
 }
