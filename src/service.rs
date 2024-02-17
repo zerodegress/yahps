@@ -8,15 +8,15 @@ pub use self::error::ErrorKind;
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub trait Service: Send + Sync + 'static
+pub trait Service: Send + Sync
 where
     Self::Packet: Clone + Send + Sync + 'static,
     Self::Decoder: Decoder<Packet = Self::Packet> + Send + Sync,
     Self::Encoder: Encoder<Packet = Self::Packet> + Send + Sync,
     Self::Handler:
         Handler<Packet = Self::Packet, Local = Self::LocalData, Addr = Self::Addr> + Send + Sync,
-    Self::LocalData: Send + Sync,
-    Self::Addr: Copy + Send + Sync,
+    Self::LocalData: Default + Send + Sync,
+    Self::Addr: Clone + Send + Sync,
 {
     type Packet;
     type Decoder;
@@ -24,10 +24,6 @@ where
     type Handler;
     type LocalData;
     type Addr;
-
-    fn init(&mut self);
-
-    fn init_local(&self) -> Self::LocalData;
 
     fn create_handler(&self) -> Self::Handler;
 
@@ -40,7 +36,7 @@ pub trait Handler
 where
     Self::Packet: Clone + Send + Sync + 'static,
     Self::Local: Send + Sync,
-    Self::Addr: Copy + Send + Sync,
+    Self::Addr: Clone + Send + Sync,
 {
     type Packet;
     type Local;
@@ -79,7 +75,7 @@ where
     ) -> Result<(), Error>;
 }
 
-pub struct ConnectionHandle<P: Clone + Send + Sync + 'static, A: Copy + Send + Sync> {
+pub struct ConnectionHandle<P: Clone + Send + Sync + 'static, A: Clone + Send + Sync> {
     addr: SocketAddr,
     last_time: SystemTime,
     disconnect_fn: Box<dyn Fn()>,
@@ -123,7 +119,7 @@ impl<P: Clone + Send + Sync + 'static, A: Copy + Send + Sync> ConnectionHandle<P
 }
 
 #[derive(Debug, Clone)]
-pub enum AddrTarget<Addr: Copy + Send + Sync> {
+pub enum AddrTarget<Addr: Clone + Send + Sync> {
     All,
     Only(Addr),
     Without(Addr),

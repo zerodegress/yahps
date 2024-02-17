@@ -1,5 +1,5 @@
 [package]
-name = "yahps-rwproxy"
+name = "yahps-rwrproxy"
 version = "0.1.0"
 edition = "2021"
 

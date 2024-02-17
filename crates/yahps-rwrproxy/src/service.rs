@@ -18,10 +18,6 @@ impl Service for Proxy {
     type LocalData = ();
     type Addr = SocketAddr;
 
-    fn init(&mut self) {}
-
-    fn init_local(&self) -> Self::LocalData {}
-
     fn create_decoder(&self) -> Self::Decoder {
         Decoder
     }

@@ -7,7 +7,7 @@ use crate::service::{AddrTarget, ConnectionHandle, Decoder, Encoder, ErrorKind, 
 
 pub struct Server<S>
 where
-    S: Service<Addr = SocketAddr>,
+    S: Service<Addr = SocketAddr> + 'static,
 {
     binds: Vec<SocketAddr>,
     worker_count: usize,
@@ -81,7 +81,7 @@ where
                                     .get(&addr)
                                     .map(|x| x.clone())
                                     .unwrap_or_else(|| {
-                                        let local = Arc::new(service.init_local());
+                                        let local = Arc::new(S::LocalData::default());
                                         conn_data_map.insert(addr, local.clone());
                                         local
                                     });
@@ -95,6 +95,7 @@ where
         }
 
         for bind in self.binds {
+            let local_data_map = local_data_map.clone();
             let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
             let listener = TcpListener::bind(bind).await?;
             let service = service.clone();
@@ -103,6 +104,7 @@ where
             join_set.spawn(async move {
                 let mut join_set = JoinSet::new();
                 loop {
+                    let local_data_map = local_data_map.clone();
                     let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
                     let packet_tx = packet_tx.clone();
                     let decoder = service.create_decoder();
@@ -173,6 +175,7 @@ where
                                             }
                                         }
                                     }
+                                    local_data_map.remove(&addr);
                                 });
                             }
                             {
