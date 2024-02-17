@@ -12,5 +12,5 @@ Yet Another High Performence Server written in Rust.
 - [ ] Event：事件处理
 - [ ] 支持UDP和更多流
 - [ ] 优雅停机
-- [ ] Handler保序操作
 - [ ] 更简洁的实现Service的方法
+- [ ] Task：有序任务处理
