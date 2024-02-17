@@ -3,7 +3,7 @@ use log::warn;
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{net::TcpListener, sync::broadcast, task::JoinSet};
 
-use crate::net::service::{ConnectionHandle, Decoder, Encoder};
+use crate::net::service::{AddrTarget, ConnectionHandle, Decoder, Encoder, Handler};
 
 use super::service::Service;
 
@@ -36,42 +36,78 @@ where
         self
     }
 
-    pub async fn run(self) -> Result<JoinSet<()>, std::io::Error> {
-        let service = Arc::new(self.service);
-        let (conn_broadcast_tx, conn_broadcast_rx) =
-            broadcast::channel::<(ConnectionSendMessageType, S::Packet)>(64);
+    pub async fn run(mut self) -> Result<(), std::io::Error> {
+        let (disconnect_broadcast_tx, _) = broadcast::channel::<AddrTarget>(64);
+        let (send_packet_broadcast_tx, _) = broadcast::channel::<(AddrTarget, S::Packet)>(64);
         let (packet_tx, packet_rx) =
             async_channel::bounded::<(S::Packet, SocketAddr, SystemTime)>(self.worker_count);
-        let conn_data_map = Arc::new(DashMap::<SocketAddr, Arc<()>>::new());
-        let global_data = None as Option<Arc<()>>;
+        let local_data_map = Arc::new(DashMap::<SocketAddr, Arc<S::LocalData>>::new());
+        let global_data = Arc::new(self.service.init_global());
+        let service = Arc::new(self.service);
         let mut join_set = JoinSet::new();
+
         for _ in 0..self.worker_count {
-            let conn_broadcast_tx = conn_broadcast_tx.clone();
+            let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
+            let send_packet_broadcast_tx = send_packet_broadcast_tx.clone();
             let packet_rx = packet_rx.clone();
-            let conn_data_map = conn_data_map.clone();
+            let conn_data_map = local_data_map.clone();
             let service = service.clone();
+            let global_data = global_data.clone();
             join_set.spawn(async move {
+                let mut handler = service.create_handler();
+                let send_packet_fn = move |target, packet| {
+                    if let Err(err) = send_packet_broadcast_tx.send((target, packet)) {
+                        warn!("{}", err);
+                    }
+                };
                 loop {
                     match packet_rx.recv().await {
                         Err(err) => {
                             warn!("{}", err);
                         }
                         Ok((packet, addr, time)) => {
-                            let conn_handle = ConnectionHandle::new(addr, time, || todo!());
-                            let local = conn_data_map.get(&addr).map(|x| x.clone());
-                            todo!()
+                            let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
+                            let conn = ConnectionHandle::new(
+                                addr,
+                                time,
+                                move || {
+                                    if let Err(err) =
+                                        disconnect_broadcast_tx.send(AddrTarget::Only(addr))
+                                    {
+                                        warn!("{}", err);
+                                    }
+                                },
+                                send_packet_fn.clone(),
+                            );
+                            let local =
+                                conn_data_map
+                                    .get(&addr)
+                                    .map(|x| x.clone())
+                                    .unwrap_or_else(|| {
+                                        let local = Arc::new(service.init_local());
+                                        conn_data_map.insert(addr, local.clone());
+                                        local
+                                    });
+                            let global = global_data.clone();
+                            if let Err(err) = handler.handle(packet, conn, local, global) {
+                                warn!("{}", err);
+                            }
                         }
                     }
                 }
             });
         }
+
         for bind in self.binds {
+            let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
             let listener = TcpListener::bind(bind).await?;
             let service = service.clone();
-            let conn_broadcast_tx = conn_broadcast_tx.clone();
+            let conn_broadcast_tx = send_packet_broadcast_tx.clone();
             let packet_tx = packet_tx.clone();
             join_set.spawn(async move {
+                let mut join_set = JoinSet::new();
                 loop {
+                    let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
                     let packet_tx = packet_tx.clone();
                     let decoder = service.create_decoder();
                     let encoder = service.create_encoder();
@@ -82,64 +118,115 @@ where
                         Ok((stream, addr)) => {
                             let mut conn_broadcast_rx = conn_broadcast_tx.subscribe();
                             let (mut stream_rx, mut stream_tx) = stream.into_split();
-                            tokio::spawn(async move {
-                                match decoder.decode(&mut stream_rx).await {
-                                    Err(err) => {
-                                        warn!("{}", err)
-                                    }
-                                    Ok(packet) => {
-                                        if let Err(err) =
-                                            packet_tx.send((packet, addr, SystemTime::now())).await
-                                        {
-                                            warn!("{}", err);
+                            {
+                                let mut disconnect_broadcast_rx = disconnect_broadcast_tx.subscribe();
+                                join_set.spawn(async move {
+                                    loop {
+                                        tokio::select! {
+                                            disc = disconnect_broadcast_rx.recv() => {
+                                                match disc {
+                                                    Err(err) => {
+                                                        warn!("{}", err);
+                                                    }
+                                                    Ok(target) => match target {
+                                                        AddrTarget::All => {
+                                                            break;
+                                                        }
+                                                        AddrTarget::Only(only_addr) if addr == only_addr => {
+                                                            break;
+                                                        }
+                                                        AddrTarget::Without(without_addr) if addr != without_addr => {
+                                                            break;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            res = decoder.decode(&mut stream_rx) => {
+                                                match res {
+                                                    Err(err) => {
+                                                        warn!("{}", err)
+                                                    }
+                                                    Ok(packet) => {
+                                                        if let Err(err) =
+                                                            packet_tx.send((packet, addr, SystemTime::now())).await
+                                                        {
+                                                            warn!("{}", err);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
-                                }
-                            });
-                            tokio::spawn(async move {
-                                match conn_broadcast_rx.recv().await {
-                                    Err(err) => {
-                                        warn!("{}", err)
-                                    }
-                                    Ok((ty, packet)) => {
-                                        let send = async move {
-                                            if let Err(err) =
-                                                encoder.encode(&mut stream_tx, &packet).await
-                                            {
-                                                warn!("{}", err);
+                                });
+                            }
+                            {
+                                let mut disconnect_broadcast_rx = disconnect_broadcast_tx.subscribe();
+                                join_set.spawn(async move {
+                                    loop {
+                                        tokio::select! {
+                                            disc = disconnect_broadcast_rx.recv() => {
+                                                match disc {
+                                                    Err(err) => {
+                                                        warn!("{}", err);
+                                                    }
+                                                    Ok(target) => match target {
+                                                        AddrTarget::All => {
+                                                            break;
+                                                        }
+                                                        AddrTarget::Only(only_addr) if addr == only_addr => {
+                                                            break;
+                                                        }
+                                                        AddrTarget::Without(without_addr) if addr != without_addr => {
+                                                            break;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            res = conn_broadcast_rx.recv() => {
+                                                match res {
+                                                    Err(err) => {
+                                                        warn!("{}", err)
+                                                    }
+                                                    Ok((target, packet)) => {
+                                                        let send = async {
+                                                            if let Err(err) =
+                                                                encoder.encode(&mut stream_tx, &packet).await
+                                                            {
+                                                                warn!("{}", err);
+                                                            }
+                                                        };
+                                                        match target {
+                                                            AddrTarget::All => {
+                                                                send.await;
+                                                            }
+                                                            AddrTarget::Only(only_addr) if addr == only_addr => {
+                                                                send.await;
+                                                            }
+                                                            AddrTarget::Without(without_addr)
+                                                                if addr != without_addr =>
+                                                            {
+                                                                send.await;
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
                                             }
                                         };
-                                        match ty {
-                                            ConnectionSendMessageType::All => {
-                                                send.await;
-                                            }
-                                            ConnectionSendMessageType::Only(only_addr)
-                                                if addr == only_addr =>
-                                            {
-                                                send.await;
-                                            }
-                                            ConnectionSendMessageType::Without(without_addr)
-                                                if addr != without_addr =>
-                                            {
-                                                send.await;
-                                            }
-                                            _ => {}
-                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                     }
                 }
+                // TODO: How to break and join
+                // while (join_set.join_next().await).is_some() {}
             });
         }
-        todo!()
-    }
-}
 
-#[derive(Debug, Clone)]
-pub enum ConnectionSendMessageType {
-    All,
-    Only(SocketAddr),
-    Without(SocketAddr),
+        while (join_set.join_next().await).is_some() {}
+        Ok(())
+    }
 }
