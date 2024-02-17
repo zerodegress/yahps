@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use log::warn;
+use log::{debug, warn};
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{net::TcpListener, sync::broadcast, task::JoinSet};
 
@@ -145,17 +145,21 @@ where
                                             res = decoder.decode(&mut stream_rx) => {
                                                 match res {
                                                     Err(err) => {
-                                                        warn!("{}", err);
                                                         match err.kind() {
+                                                            ErrorKind::Ignorable => {
+                                                                debug!("{:?}", err);
+                                                            }
+                                                            ErrorKind::WarnOnly => {
+                                                                warn!("{:?}", err);
+                                                            }
                                                             ErrorKind::Disconnect => {
                                                                 if let Err(err) = disconnect_broadcast_tx.send(AddrTarget::Only(addr)) {
-                                                                    warn!("{}", err);
+                                                                    warn!("{:?}", err);
                                                                 }
                                                             }
                                                             ErrorKind::Fatal => {
-                                                                panic!();
+                                                                panic!("{:?}", err);
                                                             }
-                                                            _ => {}
                                                         }
                                                     }
                                                     Ok(packet) => {
@@ -211,15 +215,20 @@ where
                                                             {
                                                                 warn!("{}", err);
                                                                 match err.kind() {
+                                                                    ErrorKind::Ignorable => {
+                                                                        debug!("{:?}", err);
+                                                                    }
+                                                                    ErrorKind::WarnOnly => {
+                                                                        warn!("{:?}", err);
+                                                                    }
                                                                     ErrorKind::Disconnect => {
                                                                         if let Err(err) = disconnect_broadcast_tx.send(AddrTarget::Only(addr)) {
-                                                                            warn!("{}", err);
+                                                                            warn!("{:?}", err);
                                                                         }
                                                                     }
                                                                     ErrorKind::Fatal => {
-                                                                        panic!();
+                                                                        panic!("{:?}", err);
                                                                     }
-                                                                    _ => {}
                                                                 }
                                                             }
                                                         };
@@ -256,7 +265,3 @@ where
         Ok(())
     }
 }
-
-pub trait ServerSocketAddr {}
-
-impl ServerSocketAddr for SocketAddr {}
