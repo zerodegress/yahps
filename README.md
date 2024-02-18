@@ -1,6 +1,12 @@
 # yahps
 
-Yet Another High Performence Server written in Rust. 
+Yet Another High Performance Server for games written in Rust. 
+
+又一个高性能游戏服务器框架。
+
+## 注意
+
+本项目正在开发中，不担保任何API稳定。
 
 ## 计划表
 
