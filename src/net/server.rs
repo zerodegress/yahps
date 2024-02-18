@@ -1,9 +1,12 @@
 use dashmap::DashMap;
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{net::TcpListener, sync::broadcast, task::JoinSet};
 
-use crate::service::{AddrTarget, ConnectionHandle, Decoder, Encoder, ErrorKind, Handler, Service};
+use crate::service::{
+    AddrTarget, ConnectionHandle, Decoder, Encoder, ErrorKind, GlobalConnectionHandle, Handler,
+    Service,
+};
 
 pub struct Server<S>
 where
@@ -37,11 +40,32 @@ where
     pub async fn run(self) -> Result<(), std::io::Error> {
         let (disconnect_broadcast_tx, _) = broadcast::channel::<AddrTarget<S::Addr>>(64);
         let (send_packet_broadcast_tx, _) =
-            broadcast::channel::<(AddrTarget<S::Addr>, S::Packet)>(64);
+            broadcast::channel::<(AddrTarget<S::Addr>, Arc<S::Packet>)>(64);
         let (packet_tx, packet_rx) =
             async_channel::bounded::<(S::Packet, SocketAddr, SystemTime)>(self.worker_count);
         let local_data_map = Arc::new(DashMap::<SocketAddr, Arc<S::LocalData>>::new());
-        let service = Arc::new(self.service);
+
+        let mut service = self.service;
+        {
+            let (disconnect_broadcast_tx, send_packet_broadcast_tx) = (
+                disconnect_broadcast_tx.clone(),
+                send_packet_broadcast_tx.clone(),
+            );
+            service.init(GlobalConnectionHandle::new(
+                move |target| {
+                    if let Err(err) = disconnect_broadcast_tx.send(target) {
+                        debug!("send disconnect failed from service: {:?}", err);
+                    }
+                },
+                move |target, packet| {
+                    if let Err(err) = send_packet_broadcast_tx.send((target, Arc::new(packet))) {
+                        debug!("send packet failed from service: {}", err);
+                    }
+                },
+            ));
+        }
+        let service = Arc::new(service);
+
         let mut join_set = JoinSet::new();
 
         for _ in 0..self.worker_count {
@@ -52,17 +76,20 @@ where
             let service = service.clone();
             join_set.spawn(async move {
                 let mut handler = service.create_handler();
-                let send_packet_fn = move |target, packet| {
-                    if let Err(err) = send_packet_broadcast_tx.send((target, packet)) {
-                        warn!("{}", err);
-                    }
-                };
                 loop {
+                    let send_packet_broadcast_tx = send_packet_broadcast_tx.clone();
                     match packet_rx.recv().await {
                         Err(err) => {
                             warn!("{}", err);
                         }
                         Ok((packet, addr, time)) => {
+                            let send_packet_fn = move |packet| {
+                                if let Err(err) = send_packet_broadcast_tx
+                                    .send((AddrTarget::Only(addr), Arc::new(packet)))
+                                {
+                                    warn!("{}", err);
+                                }
+                            };
                             let disconnect_broadcast_tx = disconnect_broadcast_tx.clone();
                             let conn = ConnectionHandle::new(
                                 addr,
@@ -74,7 +101,7 @@ where
                                         warn!("{}", err);
                                     }
                                 },
-                                send_packet_fn.clone(),
+                                send_packet_fn,
                             );
                             let local =
                                 conn_data_map
@@ -128,7 +155,7 @@ where
                                             disc = disconnect_broadcast_rx.recv() => {
                                                 match disc {
                                                     Err(err) => {
-                                                        warn!("{}", err);
+                                                        warn!("recv disconnect signal failed: {:?}", err);
                                                     }
                                                     Ok(target) => match target {
                                                         AddrTarget::All => {
@@ -149,18 +176,18 @@ where
                                                     Err(err) => {
                                                         match err.kind() {
                                                             ErrorKind::Ignorable => {
-                                                                debug!("{:?}", err);
+                                                                debug!("decode packet with ignorable error: {:?}", err);
                                                             }
                                                             ErrorKind::WarnOnly => {
-                                                                warn!("{:?}", err);
+                                                                warn!("decode packet with warn: {:?}", err);
                                                             }
                                                             ErrorKind::Disconnect => {
                                                                 if let Err(err) = disconnect_broadcast_tx.send(AddrTarget::Only(addr)) {
-                                                                    warn!("{:?}", err);
+                                                                    warn!("decode packet failed and disconnect: {:?}", err);
                                                                 }
                                                             }
                                                             ErrorKind::Fatal => {
-                                                                panic!("{:?}", err);
+                                                                panic!("decode packet failed and panic: {:?}", err);
                                                             }
                                                         }
                                                     }
@@ -190,7 +217,7 @@ where
                                             disc = disconnect_broadcast_rx.recv() => {
                                                 match disc {
                                                     Err(err) => {
-                                                        warn!("{}", err);
+                                                        warn!("recv disconnect signal failed: {:?}", err);
                                                     }
                                                     Ok(target) => match target {
                                                         AddrTarget::All => {
@@ -212,6 +239,7 @@ where
                                                         warn!("{}", err)
                                                     }
                                                     Ok((target, packet)) => {
+                                                        trace!("packet to send ready, target: {:?}, now addr: {:?}", target, addr);
                                                         let send = async {
                                                             if let Err(err) =
                                                                 encoder.encode(&mut stream_tx, &packet).await
@@ -219,18 +247,18 @@ where
                                                                 warn!("{}", err);
                                                                 match err.kind() {
                                                                     ErrorKind::Ignorable => {
-                                                                        debug!("{:?}", err);
+                                                                        debug!("encode packet with ignorable Error: {:?}", err);
                                                                     }
                                                                     ErrorKind::WarnOnly => {
-                                                                        warn!("{:?}", err);
+                                                                        warn!("encode packet with warn: {:?}", err);
                                                                     }
                                                                     ErrorKind::Disconnect => {
                                                                         if let Err(err) = disconnect_broadcast_tx.send(AddrTarget::Only(addr)) {
-                                                                            warn!("{:?}", err);
+                                                                            warn!("encode packet failed and disconnect: {:?}", err);
                                                                         }
                                                                     }
                                                                     ErrorKind::Fatal => {
-                                                                        panic!("{:?}", err);
+                                                                        panic!("encode packet failed and panic: {:?}", err);
                                                                     }
                                                                 }
                                                             }
@@ -240,6 +268,7 @@ where
                                                                 send.await;
                                                             }
                                                             AddrTarget::Only(only_addr) if addr == only_addr => {
+                                                                trace!("packet sent to: {}", only_addr);
                                                                 send.await;
                                                             }
                                                             AddrTarget::Without(without_addr)
