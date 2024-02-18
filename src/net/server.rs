@@ -43,7 +43,8 @@ where
             broadcast::channel::<(AddrTarget<S::Addr>, Arc<S::Packet>)>(64);
         let (packet_tx, packet_rx) =
             async_channel::bounded::<(S::Packet, SocketAddr, SystemTime)>(self.worker_count);
-        let local_data_map = Arc::new(DashMap::<SocketAddr, Arc<S::LocalData>>::new());
+        let local_data_map =
+            Arc::new(DashMap::<SocketAddr, Arc<<S::Handler as Handler>::Local>>::new());
 
         let mut service = self.service;
         {
@@ -108,7 +109,8 @@ where
                                     .get(&addr)
                                     .map(|x| x.clone())
                                     .unwrap_or_else(|| {
-                                        let local = Arc::new(S::LocalData::default());
+                                        let local =
+                                            Arc::new(<S::Handler as Handler>::Local::default());
                                         conn_data_map.insert(addr, local.clone());
                                         local
                                     });

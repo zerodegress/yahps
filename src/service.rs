@@ -13,16 +13,13 @@ where
     Self::Packet: Clone + Send + Sync + 'static,
     Self::Decoder: Decoder<Packet = Self::Packet> + Send + Sync,
     Self::Encoder: Encoder<Packet = Self::Packet> + Send + Sync,
-    Self::Handler:
-        Handler<Packet = Self::Packet, Local = Self::LocalData, Addr = Self::Addr> + Send + Sync,
-    Self::LocalData: Default + Send + Sync,
+    Self::Handler: Handler<Packet = Self::Packet, Addr = Self::Addr> + Send + Sync,
     Self::Addr: Clone + Eq + PartialEq + Hash + Send + Sync,
 {
     type Packet;
     type Decoder;
     type Encoder;
     type Handler;
-    type LocalData;
     type Addr;
 
     fn init(&mut self, global_conn: GlobalConnectionHandle<Self::Packet, Self::Addr>);
@@ -37,7 +34,7 @@ where
 pub trait Handler
 where
     Self::Packet: Clone + Send + Sync + 'static,
-    Self::Local: Send + Sync,
+    Self::Local: Default + Send + Sync,
     Self::Addr: Clone + Eq + PartialEq + Hash + Send + Sync,
 {
     type Packet;

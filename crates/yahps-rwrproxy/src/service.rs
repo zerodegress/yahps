@@ -33,7 +33,6 @@ impl Service for ReverseProxy {
     type Handler = Handler;
     type Decoder = Decoder;
     type Encoder = Encoder;
-    type LocalData = OnceLock<ReverseProxyConnection>;
     type Addr = SocketAddr;
 
     fn init(&mut self, global_conn: service::GlobalConnectionHandle<Self::Packet, Self::Addr>) {
