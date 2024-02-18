@@ -9,11 +9,14 @@ use tokio::{
 
 use crate::packet::Packet;
 
-use yahps::service::{self, AddrTarget, GlobalConnectionHandle, Service};
+use yahps::{
+    net::connection::{ConnectionHandle, GlobalConnectionHandle},
+    service::{self, AddrTarget, ConnectionHandle as _, GlobalConnectionHandle as _, Service},
+};
 
 pub struct ReverseProxy {
     target: SocketAddr,
-    global_conn: GlobalConnectionHandle<Packet, SocketAddr>,
+    global_conn: GlobalConnectionHandle<Packet>,
 }
 
 impl ReverseProxy {
@@ -34,8 +37,9 @@ impl Service for ReverseProxy {
     type Decoder = Decoder;
     type Encoder = Encoder;
     type Addr = SocketAddr;
+    type GlobalConnectionHandle = GlobalConnectionHandle<Self::Packet>;
 
-    fn init(&mut self, global_conn: service::GlobalConnectionHandle<Self::Packet, Self::Addr>) {
+    fn init(&mut self, global_conn: Self::GlobalConnectionHandle) {
         self.global_conn = global_conn;
     }
 
@@ -105,11 +109,11 @@ async fn encode(
 
 pub struct Handler {
     target: SocketAddr,
-    global_conn: GlobalConnectionHandle<Packet, SocketAddr>,
+    global_conn: GlobalConnectionHandle<Packet>,
 }
 
 impl Handler {
-    pub fn new<A>(target: A, global_conn: GlobalConnectionHandle<Packet, SocketAddr>) -> Self
+    pub fn new<A>(target: A, global_conn: GlobalConnectionHandle<Packet>) -> Self
     where
         A: Into<SocketAddr>,
     {
@@ -124,11 +128,12 @@ impl service::Handler for Handler {
     type Packet = Packet;
     type Local = OnceLock<ReverseProxyConnection>;
     type Addr = SocketAddr;
+    type ConnectionHandle = ConnectionHandle<Self::Packet>;
 
     fn handle(
         &mut self,
         packet: Self::Packet,
-        conn: service::ConnectionHandle<Self::Packet, Self::Addr>,
+        conn: Self::ConnectionHandle,
         local: std::sync::Arc<Self::Local>,
     ) -> Result<(), service::Error> {
         debug!("handle: {:?}", packet.ty());
@@ -163,7 +168,7 @@ impl ReverseProxyConnection {
     pub fn connect<A>(
         client_addr: A,
         server_addr: A,
-        global_conn: GlobalConnectionHandle<Packet, SocketAddr>,
+        global_conn: GlobalConnectionHandle<Packet>,
     ) -> Result<Self, std::io::Error>
     where
         A: Into<SocketAddr>,

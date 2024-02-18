@@ -15,14 +15,16 @@ where
     Self::Encoder: Encoder<Packet = Self::Packet> + Send + Sync,
     Self::Handler: Handler<Packet = Self::Packet, Addr = Self::Addr> + Send + Sync,
     Self::Addr: Clone + Eq + PartialEq + Hash + Send + Sync,
+    Self::GlobalConnectionHandle: GlobalConnectionHandle<Packet = Self::Packet, Addr = Self::Addr>,
 {
     type Packet;
     type Decoder;
     type Encoder;
     type Handler;
     type Addr;
+    type GlobalConnectionHandle;
 
-    fn init(&mut self, global_conn: GlobalConnectionHandle<Self::Packet, Self::Addr>);
+    fn init(&mut self, global_conn: Self::GlobalConnectionHandle);
 
     fn create_handler(&self) -> Self::Handler;
 
@@ -36,7 +38,9 @@ where
     Self::Packet: Clone + Send + Sync + 'static,
     Self::Local: Default + Send + Sync,
     Self::Addr: Clone + Eq + PartialEq + Hash + Send + Sync,
+    Self::ConnectionHandle: ConnectionHandle<Packet = Self::Packet, Addr = Self::Addr>,
 {
+    type ConnectionHandle;
     type Packet;
     type Local;
     type Addr;
@@ -44,7 +48,7 @@ where
     fn handle(
         &mut self,
         packet: Self::Packet,
-        conn: ConnectionHandle<Self::Packet, Self::Addr>,
+        conn: Self::ConnectionHandle,
         local: Arc<Self::Local>,
     ) -> Result<(), Error>;
 }
@@ -74,8 +78,20 @@ where
     ) -> Result<(), Error>;
 }
 
+pub trait GlobalConnectionHandle: Default
+where
+    Self::Packet: Clone + Send + Sync + 'static,
+    Self::Addr: Clone + Eq + PartialEq + Hash + Send + Sync,
+{
+    type Packet;
+    type Addr;
+
+    fn disconnect(&self, target: AddrTarget<Self::Addr>);
+    fn send_packet(&self, target: AddrTarget<Self::Addr>, packet: Self::Packet);
+}
+
 #[derive(Clone)]
-pub struct GlobalConnectionHandle<
+pub struct DefaultGlobalConnectionHandle<
     P: Clone + Send + Sync + 'static,
     A: Clone + Eq + PartialEq + Hash + Send + Sync,
 > {
@@ -84,7 +100,7 @@ pub struct GlobalConnectionHandle<
 }
 
 impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send + Sync> Default
-    for GlobalConnectionHandle<P, A>
+    for DefaultGlobalConnectionHandle<P, A>
 {
     fn default() -> Self {
         Self {
@@ -95,7 +111,7 @@ impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send +
 }
 
 impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send + Sync>
-    GlobalConnectionHandle<P, A>
+    DefaultGlobalConnectionHandle<P, A>
 {
     pub fn new(
         disconnect_fn: impl Fn(AddrTarget<A>) + Send + Sync + 'static,
@@ -106,18 +122,42 @@ impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send +
             send_packet_fn: Arc::new(send_packet_fn),
         }
     }
+}
 
-    pub fn disconnect(&self, target: AddrTarget<A>) {
+impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send + Sync>
+    GlobalConnectionHandle for DefaultGlobalConnectionHandle<P, A>
+{
+    type Packet = P;
+    type Addr = A;
+
+    fn disconnect(&self, target: AddrTarget<A>) {
         (self.disconnect_fn)(target)
     }
 
-    pub fn send_packet(&self, target: AddrTarget<A>, packet: P) {
+    fn send_packet(&self, target: AddrTarget<A>, packet: P) {
         (self.send_packet_fn)(target, packet)
     }
 }
 
+pub trait ConnectionHandle
+where
+    Self::Packet: Clone + Send + Sync + 'static,
+    Self::Addr: Clone + Eq + PartialEq + Hash + Send + Sync,
+{
+    type Packet;
+    type Addr;
+
+    fn addr(&self) -> &Self::Addr;
+
+    fn last_time(&self) -> &SystemTime;
+
+    fn disconnect(&self);
+
+    fn send_packet(&self, packet: Self::Packet);
+}
+
 #[derive(Clone)]
-pub struct ConnectionHandle<
+pub struct DefaultConnectionHandle<
     P: Clone + Send + Sync + 'static,
     A: Clone + Eq + PartialEq + Hash + Send + Sync,
 > {
@@ -128,7 +168,7 @@ pub struct ConnectionHandle<
 }
 
 impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send + Sync>
-    ConnectionHandle<P, A>
+    DefaultConnectionHandle<P, A>
 {
     pub fn new<F, S>(addr: A, last_time: SystemTime, disconnect_fn: F, send_packet_fn: S) -> Self
     where
@@ -142,20 +182,27 @@ impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send +
             send_packet_fn: Arc::new(send_packet_fn),
         }
     }
+}
 
-    pub fn addr(&self) -> &A {
+impl<P: Clone + Send + Sync + 'static, A: Clone + Eq + PartialEq + Hash + Send + Sync>
+    ConnectionHandle for DefaultConnectionHandle<P, A>
+{
+    type Packet = P;
+    type Addr = A;
+
+    fn addr(&self) -> &A {
         &self.addr
     }
 
-    pub fn last_time(&self) -> &SystemTime {
+    fn last_time(&self) -> &SystemTime {
         &self.last_time
     }
 
-    pub fn disconnect(&self) {
+    fn disconnect(&self) {
         (self.disconnect_fn)()
     }
 
-    pub fn send_packet(&self, packet: P) {
+    fn send_packet(&self, packet: P) {
         (self.send_packet_fn)(packet)
     }
 }

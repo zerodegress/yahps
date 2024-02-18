@@ -3,23 +3,28 @@ use log::{debug, trace, warn};
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{net::TcpListener, sync::broadcast, task::JoinSet};
 
-use crate::service::{
-    AddrTarget, ConnectionHandle, Decoder, Encoder, ErrorKind, GlobalConnectionHandle, Handler,
-    Service,
-};
+use crate::service::{AddrTarget, Decoder, Encoder, ErrorKind, Handler, Service};
 
-pub struct Server<S>
+use super::connection::{ConnectionHandle, GlobalConnectionHandle};
+
+pub struct Server<P, S>
 where
-    S: Service<Addr = SocketAddr> + 'static,
+    P: Clone + Send + Sync + 'static,
+    S: Service<Packet = P, Addr = SocketAddr, GlobalConnectionHandle = GlobalConnectionHandle<P>>
+        + 'static,
+    S::Handler: Handler<ConnectionHandle = ConnectionHandle<P>>,
 {
     binds: Vec<SocketAddr>,
     worker_count: usize,
     service: S,
 }
 
-impl<S> Server<S>
+impl<P, S> Server<P, S>
 where
-    S: Service<Addr = SocketAddr>,
+    P: Clone + Send + Sync + 'static,
+    S: Service<Packet = P, Addr = SocketAddr, GlobalConnectionHandle = GlobalConnectionHandle<P>>
+        + 'static,
+    S::Handler: Handler<ConnectionHandle = ConnectionHandle<P>>,
 {
     pub fn new(service: S) -> Self {
         Self {
