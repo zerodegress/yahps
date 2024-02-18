@@ -5,7 +5,7 @@ members = ["crates/*"]
 name = "yahps"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "LGPL-3.0"
 description = "yet another high performance server for games written in Rust"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
